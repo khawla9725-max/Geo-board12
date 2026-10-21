@@ -383,6 +383,7 @@ board.addEventListener('pointerdown', e => {
   const p = bp(e);
   if (st.mode === 'eraser'){ erasing = { id:e.pointerId, removed:false }; eraseAt(p); showRing(p); return; }
   const cands = edgesNear(p);
+  if (cur){ const old = cur.s; cur = null; if (old.pts.length) commit(old); }
   cur = { id:e.pointerId, s:{ color:st.color, w:st.width, pts:[], smooth: cands.length === 0 }, cands, snap: cands.length === 1 ? cands[0] : null, raw:[], start:p };
   addPoint(p); renderLive(cur.s);
 });
@@ -399,6 +400,7 @@ function endDraw(e){
 }
 board.addEventListener('pointerup', endDraw);
 board.addEventListener('pointercancel', endDraw);
+board.addEventListener('lostpointercapture', endDraw);
 
 /* ---------- instruments ---------- */
 const tools = [];
@@ -688,17 +690,17 @@ function showTool(t, on){
 for (const t of tools) $(t.btn).addEventListener('click', () => showTool(t, t.el.hidden));
 $('#finger').addEventListener('click', () => { st.finger = !st.finger; press('#finger', st.finger);
   hud.innerHTML = st.finger ? 'الرسم بالإصبع مفعّل · ما زال لمس الأداة يحرّكها' : 'الرسم بالقلم فقط · اللمس بالإصبع للأدوات'; save(); });
-$('#undo').addEventListener('click', () => { if (!history.length) return; strokes = history.pop(); redraw(); save(); });
-let clearTimer = null;
+$('#undo').addEventListener('click', () => {
+  cur = null; renderLive(null);
+  if (!history.length){ hud.innerHTML = 'لا توجد خطوة للتراجع عنها'; return; }
+  strokes = history.pop(); redraw(); save();
+  hud.innerHTML = 'تم التراجع خطوة واحدة';
+});
 $('#clear').addEventListener('click', () => {
-  const b = $('#clear'), span = b.querySelector('span');
-  if (!b.classList.contains('warn')){
-    b.classList.add('warn'); span.textContent = 'اضغطي للتأكيد';
-    clearTimer = setTimeout(() => { b.classList.remove('warn'); span.textContent = 'مسح الكل'; }, 3000);
-    return;
-  }
-  clearTimeout(clearTimer); b.classList.remove('warn'); span.textContent = 'مسح الكل';
-  if (strokes.length){ pushHistory(); strokes = []; redraw(); save(); }
+  cur = null; renderLive(null);
+  if (!strokes.length){ hud.innerHTML = 'اللوح فارغ'; return; }
+  pushHistory(); strokes = []; redraw(); save();
+  hud.innerHTML = 'مُسح اللوح · اضغطي <b>تراجع</b> لإرجاع الرسم';
 });
 document.addEventListener('gesturestart', e => e.preventDefault());
 document.addEventListener('dblclick', e => e.preventDefault());
@@ -710,9 +712,11 @@ function save(){
   clearTimeout(saveT);
   saveT = setTimeout(() => {
     try {
-      const base = stash || { strokes, paper: st.paper };   // drawings over an opened file stay with that file only
+      const base = stash || { strokes, history, paper: st.paper };   // drawings over an opened file stay with that file only
+      const all = [], idx = new Map(), id = x => { if (!idx.has(x)){ idx.set(x, all.length); all.push(x); } return idx.get(x); };
+      const curIdx = base.strokes.map(id), hist = base.history.slice(-25).map(a => a.map(id));
       localStorage.setItem(KEY, JSON.stringify({
-        strokes: base.strokes, paper: base.paper, axes:st.axes, finger:st.finger,
+        all, cur: curIdx, hist, paper: base.paper, axes:st.axes, finger:st.finger,
         tools: tools.map(t => ({ n:t.name, x:t.x, y:t.y, rot:t.rot, vis:!t.el.hidden, placed:t.placed, r:t.r, arm:t.arm }))
       }));
     } catch(_){}
@@ -721,7 +725,8 @@ function save(){
 function load(){
   let d = null; try { d = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch(_){}
   if (!d) return false;
-  if (Array.isArray(d.strokes)) strokes = d.strokes;
+  if (Array.isArray(d.all)){ strokes = d.cur.map(i => d.all[i]); history = (d.hist || []).map(a => a.map(i => d.all[i])); }
+  else if (Array.isArray(d.strokes)) strokes = d.strokes;
   st.axes = !!d.axes; press('#axes', st.axes);
   st.finger = !!d.finger; press('#finger', st.finger);
   setPaper(['graph','lined','blank'].includes(d.paper) ? d.paper : 'graph');
