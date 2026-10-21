@@ -98,6 +98,14 @@ body{background:var(--paper);color:var(--ink);font-family:var(--ui);overflow:hid
       <button class="btn" id="paper-blank" aria-pressed="false">بيضاء</button>
       <button class="btn" id="axes" aria-pressed="false" title="إظهار محوري س و ص">
         <svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M9 6l3-3 3 3M18 9l3 3-3 3"/></svg>محاور</button>
+      <button class="btn" id="paper-file" aria-pressed="false" title="فتح صورة أو ملف PDF كخلفية">
+        <svg viewBox="0 0 24 24"><path d="M14 3H6v18h12V7z M14 3v4h4 M12 17v-6 M9 13.5l3-3 3 3"/></svg>صورة / PDF</button>
+      <input type="file" id="file-in" accept="image/*,application/pdf,.pdf" hidden>
+    </div>
+    <div class="grp" id="pager" aria-label="صفحات الملف" hidden>
+      <button class="btn" id="pg-prev"><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>السابقة</button>
+      <span class="lbl" id="pg-lbl"></span>
+      <button class="btn" id="pg-next">التالية<svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg></button>
     </div>
     <div class="grp" aria-label="الكتابة">
       <button class="btn" id="mode-pen" aria-pressed="true" title="قلم"><svg viewBox="0 0 24 24"><path d="M4 20l4-1L19 8l-3-3L5 16z M14 7l3 3"/></svg>قلم</button>
@@ -164,6 +172,57 @@ function resize(){
   }
   drawBg(); redraw(); lctx.clearRect(0,0,W,H);
   for (const t of tools) if (!t.el.hidden) keepInside(t);
+  if (st.paper === 'file' && doc) showPage();
+}
+
+/* ---------- imported picture or PDF as the page ---------- */
+let doc = null, stash = null, renderTok = 0;
+const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+function loadScript(src){ return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); }); }
+async function getPdfjs(){
+  if (!window.pdfjsLib) await loadScript(PDFJS + 'pdf.min.js');
+  if (!window.pdfjsWorker) await loadScript(PDFJS + 'pdf.worker.min.js');   // runs the reader on the page itself
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS + 'pdf.worker.min.js';
+  return window.pdfjsLib;
+}
+function refitStrokes(or, nr){
+  const k = nr.w/or.w, seen = new Set([...strokes, ...history.flat()]);
+  for (const s of seen){ s.pts = s.pts.map(p => [nr.x + (p[0]-or.x)*k, nr.y + (p[1]-or.y)*k]); s.w *= k; }
+}
+async function showPage(){
+  if (!doc) return;
+  const tok = ++renderTok;
+  let w, h, src;
+  if (doc.kind === 'image'){ w = doc.img.naturalWidth; h = doc.img.naturalHeight; src = doc.img; }
+  else {
+    const page = await doc.pdf.getPage(doc.page); if (tok !== renderTok) return;
+    const v1 = page.getViewport({ scale:1 }); w = v1.width; h = v1.height;
+    const r = fitRect(w, h), dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const vp = page.getViewport({ scale: r.w/w*dpr });
+    const cv = document.createElement('canvas'); cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
+    await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
+    if (tok !== renderTok) return;
+    src = cv;
+  }
+  doc.w = w; doc.h = h; doc.src = src;
+  const nr = fitRect(w, h);
+  if (doc.rect && (Math.abs(nr.w - doc.rect.w) > .5 || Math.abs(nr.x - doc.rect.x) > .5 || Math.abs(nr.y - doc.rect.y) > .5)) refitStrokes(doc.rect, nr);
+  doc.rect = nr;
+  drawBg(); redraw(); updatePager();
+}
+function updatePager(){
+  const pg = $('#pager'); pg.hidden = !(st.paper === 'file' && doc && doc.n > 1);
+  if (pg.hidden) return;
+  $('#pg-lbl').textContent = `صفحة ${ar(doc.page)} من ${ar(doc.n)}`;
+  $('#pg-prev').disabled = doc.page <= 1; $('#pg-next').disabled = doc.page >= doc.n;
+}
+function goPage(n){
+  if (!doc || n < 1 || n > doc.n || n === doc.page) return;
+  doc.pages[doc.page] = { strokes, history, rect: doc.rect };
+  doc.page = n;
+  const ps = doc.pages[n] || { strokes:[], history:[], rect:null };
+  strokes = ps.strokes; history = ps.history; doc.rect = ps.rect;
+  renderLive(null); redraw(); showPage();
 }
 function origin(){ return { x: Math.round(W/2/CM)*CM, y: Math.round(H/2/CM)*CM }; }
 function gridLines(c, step, o, color, lw){
@@ -172,9 +231,21 @@ function gridLines(c, step, o, color, lw){
   for (let y = ((o.y % step) + step) % step; y <= H; y += step){ const Y = Math.round(y)+.5; c.moveTo(0,Y); c.lineTo(W,Y); }
   c.stroke();
 }
+function fitRect(w, h){
+  const m = 14, s = Math.min((W - 2*m)/w, (H - 2*m)/h), dw = w*s, dh = h*s;
+  return { x:(W - dw)/2, y:(H - dh)/2, w:dw, h:dh };
+}
 function drawBg(){
   const c = bctx; c.clearRect(0,0,W,H); c.fillStyle = css('--paper'); c.fillRect(0,0,W,H);
-  if (st.paper === 'graph'){
+  if (st.paper === 'file'){
+    c.fillStyle = '#E4E9F0'; c.fillRect(0,0,W,H);
+    if (doc && doc.src){
+      const r = fitRect(doc.w, doc.h);
+      c.save(); c.shadowColor = 'rgba(20,35,60,.28)'; c.shadowBlur = 16; c.shadowOffsetY = 3;
+      c.fillStyle = '#FFFFFF'; c.fillRect(r.x, r.y, r.w, r.h); c.restore();
+      c.drawImage(doc.src, r.x, r.y, r.w, r.h);
+    }
+  } else if (st.paper === 'graph'){
     const o = origin();
     gridLines(c, CM/5, o, css('--grid-minor'), 1);
     gridLines(c, CM, o, css('--grid-major'), 1);
@@ -567,7 +638,36 @@ function showHud(t){ hud.innerHTML = t.hud(); }
 
 /* ---------- toolbar ---------- */
 function press(sel, on){ const b = $(sel); if (b) b.setAttribute('aria-pressed', on ? 'true' : 'false'); }
-function setPaper(p){ st.paper = p; for (const k of ['graph','lined','blank']) press('#paper-'+k, k === p); $('#axes').disabled = p !== 'graph'; drawBg(); save(); }
+function pressPaper(p){ for (const k of ['graph','lined','blank','file']) press('#paper-'+k, k === p); $('#axes').disabled = p !== 'graph'; updatePager(); }
+function setPaper(p){
+  if (st.paper === 'file' && stash){ strokes = stash.strokes; history = stash.history; stash = null; doc = null; renderTok++; renderLive(null); redraw(); }
+  st.paper = p; pressPaper(p); drawBg(); save();
+}
+$('#paper-file').addEventListener('click', () => $('#file-in').click());
+$('#file-in').addEventListener('change', async e => {
+  const f = e.target.files && e.target.files[0]; e.target.value = ''; if (!f) return;
+  hud.innerHTML = 'جارٍ فتح الملف…';
+  try {
+    let nd;
+    if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)){
+      const lib = await getPdfjs();
+      const pdf = await lib.getDocument({ data: new Uint8Array(await f.arrayBuffer()) }).promise;
+      nd = { kind:'pdf', pdf, n: pdf.numPages, page:1, pages:{}, rect:null };
+    } else if (f.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|heic)$/i.test(f.name)){
+      const img = new Image(); img.src = URL.createObjectURL(f); await img.decode();
+      nd = { kind:'image', img, n:1, page:1, pages:{}, rect:null };
+    } else throw new Error('type');
+    if (st.paper !== 'file') stash = { strokes, history, paper: st.paper };
+    doc = nd; strokes = []; history = []; st.paper = 'file';
+    pressPaper('file'); renderLive(null); redraw();
+    await showPage();
+    hud.innerHTML = `<b>${f.name.replace(/[<>&]/g, '')}</b> · اكتبي وارسمي فوق الملف بالقلم`;
+  } catch(err){
+    hud.innerHTML = 'تعذّر فتح الملف. اختاري صورة (JPG أو PNG) أو ملف PDF، وتأكدي من الاتصال بالإنترنت عند فتح أول ملف PDF.';
+  }
+});
+$('#pg-prev').addEventListener('click', () => goPage(doc ? doc.page - 1 : 0));
+$('#pg-next').addEventListener('click', () => goPage(doc ? doc.page + 1 : 0));
 for (const k of ['graph','lined','blank']) $('#paper-'+k).addEventListener('click', () => setPaper(k));
 $('#axes').addEventListener('click', () => { st.axes = !st.axes; press('#axes', st.axes); drawBg(); save(); });
 function setMode(m){ st.mode = m; press('#mode-pen', m === 'pen'); press('#mode-eraser', m === 'eraser');
@@ -610,8 +710,9 @@ function save(){
   clearTimeout(saveT);
   saveT = setTimeout(() => {
     try {
+      const base = stash || { strokes, paper: st.paper };   // drawings over an opened file stay with that file only
       localStorage.setItem(KEY, JSON.stringify({
-        strokes, paper:st.paper, axes:st.axes, finger:st.finger,
+        strokes: base.strokes, paper: base.paper, axes:st.axes, finger:st.finger,
         tools: tools.map(t => ({ n:t.name, x:t.x, y:t.y, rot:t.rot, vis:!t.el.hidden, placed:t.placed, r:t.r, arm:t.arm }))
       }));
     } catch(_){}
